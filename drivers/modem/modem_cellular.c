@@ -1443,7 +1443,7 @@ MODEM_CHAT_SCRIPT_DEFINE(swir_hl7800_dial_chat_script, swir_hl7800_dial_chat_scr
 		.power_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_power_gpios, {}),		\
 		.reset_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_reset_gpios, {}),		\
 		.power_pulse_duration_ms = 1500,						\
-		.reset_pulse_duration_ms = 100,							\
+		.reset_pulse_duration_ms = DT_PROP(inst, mdm_reset_pulse_duration, 100),	\
 		.startup_time_ms = 10000,							\
 		.shutdown_time_ms = 5000,							\
 		.init_chat_script = &_CONCAT(DT_DRV_COMPAT, _init_chat_script),			\
