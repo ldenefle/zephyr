@@ -88,6 +88,8 @@ struct modem_cellular_data {
 	uint8_t registration_status_gsm;
 	uint8_t registration_status_gprs;
 	uint8_t registration_status_lte;
+	int8_t rssi;
+	uint8_t ber;
 
 	/* PPP */
 	struct modem_ppp *ppp;
@@ -296,6 +298,40 @@ static void modem_cellular_chat_on_cgmm(struct modem_chat *chat, char **argv, ui
 	strncpy(data->hwinfo, argv[1], sizeof(data->hwinfo) - 1);
 }
 
+static void modem_cellular_chat_on_csq(struct modem_chat *chat, char **argv, uint16_t argc,
+					void *user_data)
+{
+	/* AT+CSQ returns a response +CSQ: <rssi>,<ber> where:
+	 * - rssi is a integer from 0 to 31 whose values describes a signal strength
+	 *   between -113 dBm for 0 and -51dbM for 31 or unknown for 99
+	 * - ber is an integer from 0 to 7 that describes the error rate, it can also
+	 *   be 99 for an unknown error rate
+	 */
+	struct modem_cellular_data *data = (struct modem_cellular_data *)user_data;
+
+	if (argc != 3) {
+		return;
+	}
+
+	/* Read rssi */
+	uint8_t rssi = atoi(argv[1]);
+
+	if (rssi == 99) {
+		return;
+	}
+
+	data->rssi = (-113 + (2 * rssi));
+
+	/* Read ber */
+	uint8_t ber = atoi(argv[2]);
+
+	if (ber == 99) {
+		return;
+	}
+
+	data->ber = ber;
+}
+
 static bool modem_cellular_is_registered(struct modem_cellular_data *data)
 {
 	return (data->registration_status_gsm == 1)
@@ -345,6 +381,7 @@ MODEM_CHAT_MATCHES_DEFINE(allow_match,
 
 MODEM_CHAT_MATCH_DEFINE(imei_match, "", "", modem_cellular_chat_on_imei);
 MODEM_CHAT_MATCH_DEFINE(cgmm_match, "", "", modem_cellular_chat_on_cgmm);
+MODEM_CHAT_MATCH_DEFINE(csq_match, "+CSQ: ", ",", modem_cellular_chat_on_csq);
 
 MODEM_CHAT_MATCHES_DEFINE(unsol_matches,
 			  MODEM_CHAT_MATCH("+CREG: ", ",", modem_cellular_chat_on_cxreg),
@@ -1390,7 +1427,8 @@ MODEM_CHAT_SCRIPT_DEFINE(quectel_eg25_g_dial_chat_script, quectel_eg25_g_dial_ch
 MODEM_CHAT_SCRIPT_CMDS_DEFINE(quectel_eg25_g_periodic_chat_script_cmds,
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CREG?", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CEREG?", ok_match),
-			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGREG?", ok_match));
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGREG?", ok_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CSQ", csq_match));
 
 MODEM_CHAT_SCRIPT_DEFINE(quectel_eg25_g_periodic_chat_script,
 			 quectel_eg25_g_periodic_chat_script_cmds, abort_matches,
