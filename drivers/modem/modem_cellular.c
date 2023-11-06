@@ -90,6 +90,8 @@ struct modem_cellular_data {
 	uint8_t registration_status_lte;
 	int8_t rssi;
 	uint8_t ber;
+	uint8_t imsi[15];
+	uint8_t iccid[22];
 
 	/* PPP */
 	struct modem_ppp *ppp;
@@ -332,6 +334,23 @@ static void modem_cellular_chat_on_csq(struct modem_chat *chat, char **argv, uin
 	data->ber = ber;
 }
 
+static void modem_cellular_chat_on_imsi(struct modem_chat *chat, char **argv, uint16_t argc,
+					void *user_data)
+{
+	struct modem_cellular_data *data = (struct modem_cellular_data *)user_data;
+
+	strncpy(data->imsi, (char*)argv[1], sizeof(data->imsi));
+}
+
+static void modem_cellular_chat_on_iccid(struct modem_chat *chat, char **argv, uint16_t argc,
+					void *user_data)
+{
+	struct modem_cellular_data *data = (struct modem_cellular_data *)user_data;
+
+	strncpy(data->iccid, (char*)argv[1], sizeof(data->iccid));
+}
+
+
 static bool modem_cellular_is_registered(struct modem_cellular_data *data)
 {
 	return (data->registration_status_gsm == 1)
@@ -382,6 +401,8 @@ MODEM_CHAT_MATCHES_DEFINE(allow_match,
 MODEM_CHAT_MATCH_DEFINE(imei_match, "", "", modem_cellular_chat_on_imei);
 MODEM_CHAT_MATCH_DEFINE(cgmm_match, "", "", modem_cellular_chat_on_cgmm);
 MODEM_CHAT_MATCH_DEFINE(csq_match, "+CSQ: ", ",", modem_cellular_chat_on_csq);
+MODEM_CHAT_MATCH_DEFINE(imsi_match, "", "", modem_cellular_chat_on_imsi);
+MODEM_CHAT_MATCH_DEFINE(iccid_match, "+CCID: ", "", modem_cellular_chat_on_iccid);
 
 MODEM_CHAT_MATCHES_DEFINE(unsol_matches,
 			  MODEM_CHAT_MATCH("+CREG: ", ",", modem_cellular_chat_on_cxreg),
@@ -1407,6 +1428,11 @@ MODEM_CHAT_SCRIPT_CMDS_DEFINE(quectel_eg25_g_init_chat_script_cmds,
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGSN", imei_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGMM", cgmm_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("", ok_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CIMI", imsi_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("", ok_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CCID", iccid_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP_NONE("AT+CMUX=0,0,5,127,10,3,30,10,2",
 							      100));
 
