@@ -39,6 +39,7 @@ enum modem_cellular_state {
 	MODEM_CELLULAR_STATE_CARRIER_ON,
 	MODEM_CELLULAR_STATE_INIT_POWER_OFF,
 	MODEM_CELLULAR_STATE_POWER_OFF_PULSE,
+	MODEM_CELLULAR_STATE_POWER_OFF_SCRIPT,
 	MODEM_CELLULAR_STATE_AWAIT_POWER_OFF,
 };
 
@@ -110,6 +111,7 @@ struct modem_cellular_config {
 	const struct device *uart;
 	const struct gpio_dt_spec power_gpio;
 	const struct gpio_dt_spec reset_gpio;
+	const struct gpio_dt_spec dtr_gpio;
 	const uint16_t power_pulse_duration_ms;
 	const uint16_t reset_pulse_duration_ms;
 	const uint16_t startup_time_ms;
@@ -117,6 +119,7 @@ struct modem_cellular_config {
 	const struct modem_chat_script *init_chat_script;
 	const struct modem_chat_script *dial_chat_script;
 	const struct modem_chat_script *periodic_chat_script;
+	const struct modem_chat_script *power_down_script;
 };
 
 static const char *modem_cellular_state_str(enum modem_cellular_state state)
@@ -148,6 +151,8 @@ static const char *modem_cellular_state_str(enum modem_cellular_state state)
 		return "init power off";
 	case MODEM_CELLULAR_STATE_POWER_OFF_PULSE:
 		return "power off pulse";
+	case MODEM_CELLULAR_STATE_POWER_OFF_SCRIPT:
+		return "power off script";
 	case MODEM_CELLULAR_STATE_AWAIT_POWER_OFF:
 		return "await power off";
 	}
@@ -424,7 +429,9 @@ static int modem_cellular_on_idle_state_enter(struct modem_cellular_data *data)
 	const struct modem_cellular_config *config =
 		(const struct modem_cellular_config *)data->dev->config;
 
-	if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
+	if (modem_cellular_gpio_is_enabled(&config->dtr_gpio)) {
+		gpio_pin_set_dt(&config->dtr_gpio, 1);
+	} else if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
 		gpio_pin_set_dt(&config->reset_gpio, 1);
 	}
 
@@ -446,6 +453,11 @@ static void modem_cellular_idle_event_handler(struct modem_cellular_data *data,
 	case MODEM_CELLULAR_EVENT_RESUME:
 		if (modem_cellular_gpio_is_enabled(&config->power_gpio)) {
 			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_POWER_ON_PULSE);
+			break;
+		}
+
+		if (modem_cellular_gpio_is_enabled(&config->reset_gpio) && modem_cellular_gpio_is_enabled(&config->dtr_gpio)) {
+			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RESET_PULSE);
 			break;
 		}
 
@@ -476,7 +488,9 @@ static int modem_cellular_on_idle_state_leave(struct modem_cellular_data *data)
 	if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
 		gpio_pin_set_dt(&config->reset_gpio, 0);
 	}
-
+	if (modem_cellular_gpio_is_enabled(&config->dtr_gpio)) {
+		gpio_pin_set_dt(&config->dtr_gpio, 0);
+	}
 	return 0;
 }
 
@@ -859,7 +873,6 @@ static int modem_cellular_on_carrier_on_state_leave(struct modem_cellular_data *
 
 static int modem_cellular_on_init_power_off_state_enter(struct modem_cellular_data *data)
 {
-	modem_pipe_close_async(data->uart_pipe);
 	modem_cellular_start_timer(data, K_MSEC(2000));
 	return 0;
 }
@@ -872,24 +885,19 @@ static void modem_cellular_init_power_off_event_handler(struct modem_cellular_da
 
 	switch (evt) {
 	case MODEM_CELLULAR_EVENT_TIMEOUT:
-		if (modem_cellular_gpio_is_enabled(&config->power_gpio)) {
+		if (config->power_down_script != NULL) {
+			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_POWER_OFF_SCRIPT);
+			break;
+		} else if (modem_cellular_gpio_is_enabled(&config->power_gpio)) {
 			modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_POWER_OFF_PULSE);
 			break;
 		}
-
 		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_IDLE);
 		break;
 
 	default:
 		break;
 	}
-}
-
-static int modem_cellular_on_init_power_off_state_leave(struct modem_cellular_data *data)
-{
-	modem_chat_release(&data->chat);
-	modem_ppp_release(data->ppp);
-	return 0;
 }
 
 static int modem_cellular_on_power_off_pulse_state_enter(struct modem_cellular_data *data)
@@ -925,11 +933,36 @@ static int modem_cellular_on_power_off_pulse_state_leave(struct modem_cellular_d
 	return 0;
 }
 
+static int modem_cellular_on_power_off_script_state_enter(struct modem_cellular_data *data)
+{
+	const struct modem_cellular_config *config =
+		(const struct modem_cellular_config *)data->dev->config;
+	modem_chat_attach(&data->chat, data->dlci2_pipe);
+	modem_chat_run_script_async(&data->chat, config->power_down_script);
+	return 0;
+}
+
+static void modem_cellular_power_off_script_event_handler(struct modem_cellular_data *data,
+							enum modem_cellular_event evt)
+{
+	switch (evt) {
+
+	case MODEM_CELLULAR_EVENT_SCRIPT_SUCCESS:
+		modem_pipe_close_async(data->uart_pipe);
+		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_AWAIT_POWER_OFF);
+		break;
+	default:
+		break;
+	}
+}
+
 static int modem_cellular_on_await_power_off_state_enter(struct modem_cellular_data *data)
 {
 	const struct modem_cellular_config *config =
 		(const struct modem_cellular_config *)data->dev->config;
 
+	modem_chat_release(&data->chat);
+	modem_ppp_release(data->ppp);
 	modem_cellular_start_timer(data, K_MSEC(config->shutdown_time_ms));
 	return 0;
 }
@@ -1004,6 +1037,10 @@ static int modem_cellular_on_state_enter(struct modem_cellular_data *data)
 		ret = modem_cellular_on_power_off_pulse_state_enter(data);
 		break;
 
+	case MODEM_CELLULAR_STATE_POWER_OFF_SCRIPT:
+		ret = modem_cellular_on_power_off_script_state_enter(data);
+		break;
+
 	case MODEM_CELLULAR_STATE_AWAIT_POWER_OFF:
 		ret = modem_cellular_on_await_power_off_state_enter(data);
 		break;
@@ -1051,10 +1088,6 @@ static int modem_cellular_on_state_leave(struct modem_cellular_data *data)
 
 	case MODEM_CELLULAR_STATE_CARRIER_ON:
 		ret = modem_cellular_on_carrier_on_state_leave(data);
-		break;
-
-	case MODEM_CELLULAR_STATE_INIT_POWER_OFF:
-		ret = modem_cellular_on_init_power_off_state_leave(data);
 		break;
 
 	case MODEM_CELLULAR_STATE_POWER_OFF_PULSE:
@@ -1152,6 +1185,10 @@ static void modem_cellular_event_handler(struct modem_cellular_data *data,
 		modem_cellular_power_off_pulse_event_handler(data, evt);
 		break;
 
+	case MODEM_CELLULAR_STATE_POWER_OFF_SCRIPT:
+		modem_cellular_power_off_script_event_handler(data, evt);
+		break;
+
 	case MODEM_CELLULAR_STATE_AWAIT_POWER_OFF:
 		modem_cellular_await_power_off_event_handler(data, evt);
 		break;
@@ -1223,6 +1260,10 @@ static int modem_cellular_init(const struct device *dev)
 
 	if (modem_cellular_gpio_is_enabled(&config->reset_gpio)) {
 		gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_ACTIVE);
+	}
+
+	if (modem_cellular_gpio_is_enabled(&config->dtr_gpio)) {
+		gpio_pin_configure_dt(&config->dtr_gpio, GPIO_OUTPUT_INACTIVE);
 	}
 
 	{
@@ -1385,6 +1426,13 @@ MODEM_CHAT_SCRIPT_CMDS_DEFINE(quectel_eg25_g_dial_chat_script_cmds,
 			      MODEM_CHAT_SCRIPT_CMD_RESP_NONE("ATD*99***1#", 0),);
 
 MODEM_CHAT_SCRIPT_DEFINE(quectel_eg25_g_dial_chat_script, quectel_eg25_g_dial_chat_script_cmds,
+			 dial_abort_matches, modem_cellular_chat_callback_handler, 10);
+
+MODEM_CHAT_SCRIPT_CMDS_DEFINE(quectel_eg25_g_power_down_script_cmds,
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CFUN=1", ok_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+QSCLK=1", ok_match),);
+
+MODEM_CHAT_SCRIPT_DEFINE(quectel_eg25_g_power_down_script, quectel_eg25_g_power_down_script_cmds,
 			 dial_abort_matches, modem_cellular_chat_callback_handler, 10);
 
 MODEM_CHAT_SCRIPT_CMDS_DEFINE(quectel_eg25_g_periodic_chat_script_cmds,
@@ -1670,6 +1718,7 @@ MODEM_CHAT_SCRIPT_DEFINE(telit_me910g1_dial_chat_script, telit_me910g1_dial_chat
 		.uart = DEVICE_DT_GET(DT_INST_BUS(inst)),                                          \
 		.power_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_power_gpios, {}),                 \
 		.reset_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_reset_gpios, {}),                 \
+		.dtr_gpio   = GPIO_DT_SPEC_INST_GET_OR(inst, mdm_dtr_gpios, {}),                   \
 		.power_pulse_duration_ms = 1500,                                                   \
 		.reset_pulse_duration_ms = 500,                                                    \
 		.startup_time_ms = 15000,                                                          \
@@ -1677,6 +1726,7 @@ MODEM_CHAT_SCRIPT_DEFINE(telit_me910g1_dial_chat_script, telit_me910g1_dial_chat
 		.init_chat_script = &quectel_eg25_g_init_chat_script,                              \
 		.dial_chat_script = &quectel_eg25_g_dial_chat_script,                              \
 		.periodic_chat_script = &_CONCAT(DT_DRV_COMPAT, _periodic_chat_script),            \
+		.power_down_script = &quectel_eg25_g_power_down_script,                            \
 	};                                                                                         \
                                                                                                    \
 	PM_DEVICE_DT_INST_DEFINE(inst, modem_cellular_pm_action);                                  \
