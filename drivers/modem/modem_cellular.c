@@ -2024,7 +2024,7 @@ MODEM_CHAT_SCRIPT_DEFINE(quectel_eg25_g_power_down_script, quectel_eg25_g_power_
 MODEM_CHAT_SCRIPT_CMDS_DEFINE(quectel_eg25_g_periodic_chat_script_cmds,
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CREG?", ok_match),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CEREG?", ok_match),
-			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CGREG?", ok_match),
+			      MODEM_CHAT_SCRIPT_CMD_RESP_MULT("AT+CGREG?", unsol_matches),
 			      MODEM_CHAT_SCRIPT_CMD_RESP("AT+CSQ", csq_match));
 
 MODEM_CHAT_SCRIPT_DEFINE(quectel_eg25_g_periodic_chat_script,
