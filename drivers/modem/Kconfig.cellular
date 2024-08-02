@@ -55,6 +55,7 @@ config MODEM_CELLULAR_USER_PIPE_BUFFER_SIZES
 	default 128
 
 choice
+	default MODEM_CELLULAR_UART_BAUDRATE_115200
 	prompt "Choose a uart baudrate"
 
 	config MODEM_CELLULAR_UART_BAUDRATE_9600
