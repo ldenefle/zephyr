@@ -83,6 +83,7 @@ enum modem_cellular_event {
 	MODEM_CELLULAR_EVENT_BUS_CLOSED,
 	MODEM_CELLULAR_EVENT_RESET,
 	MODEM_CELLULAR_EVENT_RDY,
+	MODEM_CELLULAR_EVENT_STATE_TIMEOUT,
 };
 
 struct modem_cellular_data {
@@ -132,6 +133,7 @@ struct modem_cellular_data {
 	enum modem_cellular_state state;
 	const struct device *dev;
 	struct k_work_delayable timeout_work;
+	struct k_work_delayable state_timeout_work;
 
 	/* Power management */
 	struct k_sem suspended_sem;
@@ -243,6 +245,8 @@ static const char *modem_cellular_event_str(enum modem_cellular_event event)
 		return "reset";
 	case MODEM_CELLULAR_EVENT_RDY:
 		return "ready";
+	case MODEM_CELLULAR_EVENT_STATE_TIMEOUT:
+		return "state timeout";
 	}
 
 	return "";
@@ -584,6 +588,11 @@ static void modem_cellular_stop_timer(struct modem_cellular_data *data)
 	k_work_cancel_delayable(&data->timeout_work);
 }
 
+static void modem_cellular_disable_state_timeout(struct modem_cellular_data *data)
+{
+	k_work_cancel_delayable(&data->state_timeout_work);
+}
+
 static void modem_cellular_timeout_handler(struct k_work *item)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(item);
@@ -591,6 +600,15 @@ static void modem_cellular_timeout_handler(struct k_work *item)
 		CONTAINER_OF(dwork, struct modem_cellular_data, timeout_work);
 
 	modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_TIMEOUT);
+}
+
+static void modem_cellular_state_timeout_handler(struct k_work *item)
+{
+	struct k_work_delayable *dwork = k_work_delayable_from_work(item);
+	struct modem_cellular_data *data =
+		CONTAINER_OF(dwork, struct modem_cellular_data, state_timeout_work);
+
+	modem_cellular_delegate_event(data, MODEM_CELLULAR_EVENT_STATE_TIMEOUT);
 }
 
 static void modem_cellular_event_dispatch_handler(struct k_work *item)
@@ -625,6 +643,8 @@ static int modem_cellular_on_idle_state_enter(struct modem_cellular_data *data)
 {
 	const struct modem_cellular_config *config =
 		(const struct modem_cellular_config *)data->dev->config;
+
+	modem_cellular_disable_state_timeout(data);
 
 	if (modem_cellular_gpio_is_enabled(&config->dtr_gpio)) {
 		gpio_pin_set_dt(&config->dtr_gpio, 1);
@@ -706,6 +726,13 @@ static int modem_cellular_on_reset_pulse_state_enter(struct modem_cellular_data 
 {
 	const struct modem_cellular_config *config =
 		(const struct modem_cellular_config *)data->dev->config;
+
+	/* Make sure we cleanup everything */
+	modem_cellular_notify_user_pipes_disconnected(data);
+	modem_chat_release(&data->chat);
+	modem_ppp_release(data->ppp);
+	modem_cmux_release(&data->cmux);
+	modem_pipe_close_async(data->uart_pipe);
 
 	gpio_pin_set_dt(&config->reset_gpio, 1);
 
@@ -1011,6 +1038,8 @@ static int modem_cellular_on_run_dial_script_state_leave(struct modem_cellular_d
 
 static int modem_cellular_on_await_registered_state_enter(struct modem_cellular_data *data)
 {
+	modem_cellular_disable_state_timeout(data);
+
 	if (modem_ppp_attach(data->ppp, data->dlci1_pipe) < 0) {
 		return -EAGAIN;
 	}
@@ -1056,6 +1085,7 @@ static int modem_cellular_on_await_registered_state_leave(struct modem_cellular_
 
 static int modem_cellular_on_carrier_on_state_enter(struct modem_cellular_data *data)
 {
+	modem_cellular_disable_state_timeout(data);
 	net_if_carrier_on(modem_ppp_get_iface(data->ppp));
 	modem_cellular_start_timer(data, MODEM_CELLULAR_PERIODIC_SCRIPT_TIMEOUT);
 	return 0;
@@ -1114,6 +1144,7 @@ static int modem_cellular_on_active_sleep_state_enter(struct modem_cellular_data
 	const struct modem_cellular_config *config =
 		(const struct modem_cellular_config *)data->dev->config;
 
+	modem_cellular_disable_state_timeout(data);
 	modem_chat_run_script_async(&data->chat, config->power_down_script);
 
 
@@ -1315,6 +1346,8 @@ static int modem_cellular_on_state_enter(struct modem_cellular_data *data)
 {
 	int ret;
 
+	k_work_schedule(&data->state_timeout_work, K_SECONDS(30));
+
 	switch (data->state) {
 	case MODEM_CELLULAR_STATE_IDLE:
 		ret = modem_cellular_on_idle_state_enter(data);
@@ -1395,6 +1428,9 @@ static int modem_cellular_on_state_enter(struct modem_cellular_data *data)
 static int modem_cellular_on_state_leave(struct modem_cellular_data *data)
 {
 	int ret;
+
+	/* Clear state timeout */
+	k_work_cancel_delayable(&data->state_timeout_work);
 
 	switch (data->state) {
 	case MODEM_CELLULAR_STATE_IDLE:
@@ -1482,6 +1518,10 @@ static void modem_cellular_event_handler(struct modem_cellular_data *data,
 	state = data->state;
 
 	modem_cellular_log_event(evt);
+
+	if (evt == MODEM_CELLULAR_EVENT_STATE_TIMEOUT) {
+		modem_cellular_enter_state(data, MODEM_CELLULAR_STATE_RESET_PULSE);
+	}
 
 	switch (data->state) {
 	case MODEM_CELLULAR_STATE_IDLE:
@@ -1787,6 +1827,7 @@ static int modem_cellular_init(const struct device *dev)
 	data->dev = dev;
 
 	k_work_init_delayable(&data->timeout_work, modem_cellular_timeout_handler);
+	k_work_init_delayable(&data->state_timeout_work, modem_cellular_state_timeout_handler);
 
 	k_work_init(&data->event_dispatch_work, modem_cellular_event_dispatch_handler);
 	ring_buf_init(&data->event_rb, sizeof(data->event_buf), data->event_buf);
